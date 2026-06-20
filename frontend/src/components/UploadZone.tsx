@@ -62,7 +62,12 @@ export function UploadZone({ disabled, onFileSelect }: UploadZoneProps) {
       <div className="upload-zone__icon" aria-hidden="true">
         ⬆
       </div>
-      <h2 className="upload-zone__title">動画をドラッグ＆ドロップ</h2>
+      <h2 className="upload-zone__title">
+        動画をドラッグ＆ドロップ
+      </h2>
+      <p className="upload-zone__hint">
+        日本語・韓国語など多言語の自動認識に対応
+      </p>
       <p className="upload-zone__hint">またはクリックしてファイルを選択</p>
       <p className="upload-zone__formats">MP4 / MKV / WebM / MOV など</p>
     </div>

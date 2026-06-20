@@ -165,7 +165,7 @@ export default function App() {
           <span className="app-header__logo" aria-hidden="true">字</span>
           <div>
             <h1>Auto Subtitle Viewer</h1>
-            <p>中国語動画 → 日本語字幕を自動生成</p>
+            <p>多言語動画 → 日本語字幕を自動生成</p>
           </div>
         </div>
         <div className="app-header__actions">
@@ -202,8 +202,8 @@ export default function App() {
             <UploadZone disabled={isProcessing} onFileSelect={processFile} />
             <ul className="hero__steps">
               <li>動画をアップロード</li>
-              <li>音声認識（中国語）</li>
-              <li>Gemini で日本語翻訳</li>
+              <li>音声認識（多言語・自動検出）</li>
+              <li>Gemini で日本語字幕に変換</li>
               <li>プレイヤーで字幕表示</li>
             </ul>
           </section>

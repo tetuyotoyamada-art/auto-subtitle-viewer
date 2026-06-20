@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class WhisperTranscriber:
-    """Extract timestamped Chinese text from video/audio via faster-whisper."""
+    """Extract timestamped text from video/audio via faster-whisper."""
 
     def __init__(self, config: WhisperConfig) -> None:
         self._config = config
@@ -45,10 +45,20 @@ class WhisperTranscriber:
         model = self._load_model()
         logger.info("Transcribing: %s", media_path)
 
-        segments_iter, _info = model.transcribe(
+        segments_iter, info = model.transcribe(
             str(media_path),
-            language=self._config.language,
+            **(
+                {"language": self._config.language}
+                if self._config.language
+                else {}
+            ),
             vad_filter=True,
+        )
+
+        logger.info(
+            "Detected language: %s (probability: %.2f)",
+            info.language,
+            info.language_probability,
         )
 
         segments: list[SubtitleSegment] = []

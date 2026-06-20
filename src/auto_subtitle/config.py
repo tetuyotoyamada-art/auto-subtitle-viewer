@@ -16,7 +16,7 @@ class WhisperConfig:
     model: str = "large-v3"
     device: str = "cuda"
     compute_type: str = "float16"
-    language: str = "zh"
+    language: str | None = None  # None = Whisper auto-detect
 
 
 @dataclass(frozen=True)
