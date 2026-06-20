@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+*.vtt
+*.srt
+*.mp4
+*.wav
+*.m4a
+uploads/
+tmp/
+frontend/node_modules/
+frontend/dist/

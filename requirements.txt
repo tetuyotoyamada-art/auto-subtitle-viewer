@@ -1,0 +1,16 @@
+# Phase 1: speech recognition
+faster-whisper>=1.1.0
+
+# GPU (CUDA 12) - required on Windows for faster-whisper/CTranslate2
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9,<10
+nvidia-cuda-nvrtc-cu12
+
+# Phase 1: LLM translation (Google Gemini)
+google-genai>=1.0.0
+python-dotenv>=1.0.0
+
+# Phase 2: FastAPI backend
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12

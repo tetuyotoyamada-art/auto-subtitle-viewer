@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-subtitle-viewer"
+version = "0.2.0"
+description = "Chinese video auto-transcription and Japanese subtitle generation"
+readme = "project_roadmap.md"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper>=1.1.0",
+    "google-genai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12>=9,<10",
+    "nvidia-cuda-nvrtc-cu12",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+]
+
+[project.scripts]
+auto-subtitle = "auto_subtitle.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.27.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
