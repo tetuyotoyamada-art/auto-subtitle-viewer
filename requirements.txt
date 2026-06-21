@@ -1,16 +1,38 @@
-# Phase 1: speech recognition
+# =============================================================================
+# Auto Subtitle Viewer - Python dependencies
+# Install: pip install -r requirements.txt && pip install -e .
+# Python 3.10+ required
+# =============================================================================
+
+# --- Speech recognition (faster-whisper / CTranslate2) ---
 faster-whisper>=1.1.0
 
-# GPU (CUDA 12) - required on Windows for faster-whisper/CTranslate2
+# --- Translation (Google Gemini API via google-genai SDK) ---
+google-genai>=1.0.0
+
+# --- Environment / configuration ---
+python-dotenv>=1.0.0
+
+# --- Web API (FastAPI backend + static frontend hosting) ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+pydantic>=2.0.0
+
+# --- GPU acceleration (CUDA 12, optional) ---
+# Required for WHISPER_DEVICE=cuda on Windows/Linux with NVIDIA GPU.
+# Skip or comment out on CPU-only machines or macOS (use WHISPER_DEVICE=cpu).
 nvidia-cublas-cu12
 nvidia-cudnn-cu12>=9,<10
 nvidia-cuda-nvrtc-cu12
 
-# Phase 1: LLM translation (Google Gemini)
-google-genai>=1.0.0
-python-dotenv>=1.0.0
-
-# Phase 2: FastAPI backend
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-python-multipart>=0.0.12
+# =============================================================================
+# System dependencies (not installed via pip)
+# =============================================================================
+# FFmpeg + ffprobe: required for "Download video with burned-in subtitles".
+#   Windows: winget install Gyan.FFmpeg
+#   macOS:   brew install ffmpeg
+#   Linux:   sudo apt install ffmpeg
+#
+# Node.js 18+: required only when building the frontend (build_frontend.bat).
+# GEMINI_API_KEY: set in .env (see .env.example).
