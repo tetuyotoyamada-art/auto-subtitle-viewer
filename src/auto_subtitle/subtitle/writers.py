@@ -39,6 +39,11 @@ def format_srt_content(segments: list[SubtitleSegment]) -> str:
     return "\n".join(lines)
 
 
+def segments_to_srt_text(segments: list[SubtitleSegment]) -> str:
+    """Build standard SRT subtitle text from segment timing and translated text."""
+    return format_srt_content(segments)
+
+
 def format_subtitle_content(segments: list[SubtitleSegment], fmt: str) -> str:
     if fmt == "srt":
         return format_srt_content(segments)

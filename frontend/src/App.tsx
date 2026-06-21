@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   generateSubtitlesStream,
   checkHealth,
+  downloadHardSubVideo,
   toFriendlyError,
 } from './api/client'
 import { ErrorAlert } from './components/ErrorAlert'
@@ -69,6 +70,8 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0)
   const [format, setFormat] = useState<SubtitleFormat>('vtt')
   const [subtitleStyle, setSubtitleStyle] = useState(loadSubtitleStyle)
+  const [isBurningVideo, setIsBurningVideo] = useState(false)
+  const [burnError, setBurnError] = useState<AppErrorInfo | null>(null)
 
   const videoUrlRef = useRef<string | null>(null)
   const downloadUrlRef = useRef<string | null>(null)
@@ -98,6 +101,7 @@ export default function App() {
     async (file: File) => {
       revokeUrls()
       setError(null)
+      setBurnError(null)
       setSegments([])
       setCurrentTime(0)
       setStage('uploading')
@@ -148,12 +152,42 @@ export default function App() {
     setSegments([])
     setCurrentTime(0)
     setError(null)
+    setBurnError(null)
     setStage('idle')
     setProgress({ stage: 'idle', message: '' })
   }
 
   const handleSeek = (time: number) => {
     playerRef.current?.seek(time)
+  }
+
+  const isVideoFile = Boolean(selectedFile?.type.startsWith('video/'))
+
+  const handleDownloadHardSubVideo = async () => {
+    if (!selectedFile || segments.length === 0 || !isVideoFile) return
+
+    setIsBurningVideo(true)
+    setBurnError(null)
+
+    try {
+      const blob = await downloadHardSubVideo(selectedFile, segments, {
+        fontSize: subtitleStyle.fontSize,
+        fontColor: subtitleStyle.color,
+        backgroundColor: subtitleStyle.backgroundColor,
+      })
+
+      const baseName = selectedFile.name.replace(/\.[^.]+$/, '') || 'video'
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${baseName}_subtitled.mp4`
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setBurnError(toFriendlyError(err))
+    } finally {
+      setIsBurningVideo(false)
+    }
   }
 
   const isProcessing = PROCESSING_STAGES.includes(stage)
@@ -240,13 +274,36 @@ export default function App() {
                       message={`字幕生成完了（${segments.length} セグメント）`}
                       variant="success"
                     />
-                    <a
-                      className="btn btn--primary"
-                      href={downloadUrl}
-                      download={`${selectedFile?.name.replace(/\.[^.]+$/, '') ?? 'subtitle'}.${format}`}
-                    >
-                      字幕をダウンロード ({format.toUpperCase()})
-                    </a>
+                    <div className="workspace__toolbar-actions">
+                      <a
+                        className="btn btn--primary"
+                        href={downloadUrl}
+                        download={`${selectedFile?.name.replace(/\.[^.]+$/, '') ?? 'subtitle'}.${format}`}
+                      >
+                        字幕をダウンロード ({format.toUpperCase()})
+                      </a>
+                      <button
+                        type="button"
+                        className={`btn btn--secondary${isBurningVideo ? ' btn--loading' : ''}`}
+                        disabled={!isVideoFile || isBurningVideo || segments.length === 0}
+                        title={
+                          isVideoFile
+                            ? undefined
+                            : '字幕焼き付けには動画ファイルが必要です'
+                        }
+                        onClick={handleDownloadHardSubVideo}
+                      >
+                        {isBurningVideo
+                          ? '動画を処理中…'
+                          : '字幕付き動画をダウンロード'}
+                      </button>
+                    </div>
+                    {burnError && (
+                      <p className="workspace__burn-error" role="alert">
+                        {burnError.title}: {burnError.message}
+                        {burnError.hint ? ` — ${burnError.hint}` : ''}
+                      </p>
+                    )}
                   </div>
                 )}
 

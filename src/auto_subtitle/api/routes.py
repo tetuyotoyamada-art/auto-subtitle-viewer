@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from auto_subtitle.api.schemas import (
     HealthResponse,
@@ -23,6 +24,8 @@ from auto_subtitle.api.schemas import (
 )
 from auto_subtitle.config import AppConfig, load_config
 from auto_subtitle.core import ProcessOptions, process_media
+from auto_subtitle.subtitle.models import SubtitleSegment
+from auto_subtitle.video.hardsub import VIDEO_EXTENSIONS, burn_subtitles_into_video
 
 router = APIRouter()
 
@@ -139,6 +142,38 @@ async def _save_upload(file: UploadFile) -> tuple[Path, Path]:
     return temp_dir, media_path
 
 
+def _segments_from_json(raw: str) -> list[SubtitleSegment]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="segments JSON の形式が不正です。") from exc
+
+    if not isinstance(payload, list) or not payload:
+        raise HTTPException(status_code=400, detail="segments が空です。")
+
+    segments: list[SubtitleSegment] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="segments の各要素はオブジェクトである必要があります。")
+        try:
+            segments.append(
+                SubtitleSegment(
+                    index=int(item["index"]),
+                    start=float(item["start"]),
+                    end=float(item["end"]),
+                    text_zh=str(item.get("text_zh", "")),
+                    text_ja=str(item.get("text_ja", "")),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="segments に index/start/end が必要です。",
+            ) from exc
+
+    return segments
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse()
@@ -250,3 +285,62 @@ async def generate_from_path(body: PathGenerateRequest) -> SubtitleGenerateRespo
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/download-video")
+async def download_video_with_hardsub(
+    file: UploadFile = File(..., description="Original video file"),
+    segments: str = Form(..., description="JSON array of subtitle segments"),
+    font_size: int = Form(22, ge=12, le=72),
+    font_color: str = Form("#ffffff"),
+    background_color: str = Form("rgba(0, 0, 0, 0.55)"),
+) -> FileResponse:
+    """Burn translated subtitles into the video and return MP4."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required.")
+
+    suffix = Path(file.filename).suffix.lower() or ".mp4"
+    if suffix not in VIDEO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="字幕焼き付けには動画ファイル（MP4/MKV/WebM など）が必要です。",
+        )
+
+    parsed_segments = _segments_from_json(segments)
+    temp_dir = Path(tempfile.mkdtemp(prefix="auto-subtitle-burn-"))
+    media_path = temp_dir / f"source{suffix}"
+    output_path = temp_dir / "output_subtitled.mp4"
+
+    try:
+        with media_path.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        await asyncio.to_thread(
+            burn_subtitles_into_video,
+            media_path,
+            parsed_segments,
+            output_path,
+            font_size=font_size,
+            font_color=font_color,
+            background_color=background_color,
+        )
+    except FileNotFoundError as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    download_name = f"{Path(file.filename).stem}_subtitled.mp4"
+    return FileResponse(
+        path=output_path,
+        media_type="video/mp4",
+        filename=download_name,
+        background=BackgroundTask(shutil.rmtree, temp_dir, True),
+    )

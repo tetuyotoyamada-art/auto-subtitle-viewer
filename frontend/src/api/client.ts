@@ -1,6 +1,7 @@
 import type {
   AppErrorInfo,
   ProgressEvent,
+  Segment,
   SubtitleFormat,
   SubtitleGenerateResponse,
 } from '../types'
@@ -47,6 +48,13 @@ export function toFriendlyError(error: unknown): AppErrorInfo {
           message: error.message,
           hint: 'バックエンドのログを確認するか、しばらく待ってから再試行してください。',
           statusCode: 500,
+        }
+      case 503:
+        return {
+          title: 'FFmpeg が利用できません',
+          message: error.message,
+          hint: 'FFmpeg をインストールし、PATH に追加してから再試行してください。',
+          statusCode: 503,
         }
       default:
         return {
@@ -204,4 +212,35 @@ export async function generateSubtitles(
   }
 
   return response.json() as Promise<SubtitleGenerateResponse>
+}
+
+export async function downloadHardSubVideo(
+  file: File,
+  segments: Segment[],
+  options: {
+    fontSize?: number
+    fontColor?: string
+    backgroundColor?: string
+  } = {},
+): Promise<Blob> {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('segments', JSON.stringify(segments))
+  formData.append('font_size', String(options.fontSize ?? 22))
+  formData.append('font_color', options.fontColor ?? '#ffffff')
+  formData.append(
+    'background_color',
+    options.backgroundColor ?? 'rgba(0, 0, 0, 0.55)',
+  )
+
+  const response = await fetch(`${API_BASE}/api/download-video`, {
+    method: 'POST',
+    body: formData,
+  })
+
+  if (!response.ok) {
+    throw await parseErrorResponse(response)
+  }
+
+  return response.blob()
 }

@@ -1,61 +1,78 @@
-"""LLM-based translation from Chinese to Japanese."""
+"""Legacy OpenAI-compatible translator (batch-only; prefer core.translate_segments for Gemini)."""
 
 from __future__ import annotations
 
+import json
 import logging
 
 from openai import OpenAI
 
-from auto_subtitle.config import LLMConfig
 from auto_subtitle.subtitle.models import SubtitleSegment
 
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-あなたは中国語字幕を日本語に翻訳する専門家です。
-以下のルールを厳守してください:
-- 1行あたり{max_chars}文字以内に収める
-- 自然な日本語の意訳を行う（直訳より読みやすさを優先）
-- 原文の意味を正確に伝える
-- 翻訳結果のみを返す（説明や注釈は不要）
+あなたは字幕翻訳の専門家です。
+入力 JSON の segments 配列について、各 text を text_ja に翻訳し、
+同じ構造の JSON のみを1回のレスポンスで返してください。
 """
 
 
 class LLMTranslator:
-    """Translate subtitle segments from Chinese to Japanese via LLM API."""
+    """Translate subtitle segments via OpenAI-compatible API in one batch request."""
 
-    def __init__(self, config: LLMConfig) -> None:
-        self._config = config
-        self._client = OpenAI(
-            api_key=config.api_key,
-            base_url=config.base_url,
-        )
+    def __init__(self, *, api_key: str, base_url: str, model: str) -> None:
+        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        self._model = model
 
     def translate(self, segments: list[SubtitleSegment]) -> list[SubtitleSegment]:
-        """Translate all segments, preserving timing metadata."""
+        """Translate all segments in a single API call."""
+        return self.translate_batch(segments)
+
+    def translate_batch(self, segments: list[SubtitleSegment]) -> list[SubtitleSegment]:
         if not segments:
             return segments
 
-        logger.info("Translating %d segments via LLM", len(segments))
-        system = SYSTEM_PROMPT.format(max_chars=self._config.max_chars_per_line)
+        payload = {
+            "segment_count": len(segments),
+            "segments": [
+                {
+                    "index": seg.index,
+                    "start": round(seg.start, 3),
+                    "end": round(seg.end, 3),
+                    "text": seg.text_zh,
+                }
+                for seg in segments
+            ],
+        }
 
-        for seg in segments:
-            if not seg.text_zh:
-                continue
-            response = self._client.chat.completions.create(
-                model=self._config.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": seg.text_zh},
-                ],
-                temperature=0.3,
-            )
-            seg.text_ja = (response.choices[0].message.content or "").strip()
+        logger.info("LLM batch translation: 1 API request for %d segments", len(segments))
+        response = self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, ensure_ascii=False),
+                },
+            ],
+            temperature=0.3,
+        )
 
-        logger.info("Translation complete")
+        raw = (response.choices[0].message.content or "").strip()
+        try:
+            parsed = json.loads(raw)
+            items = parsed.get("segments", parsed) if isinstance(parsed, dict) else parsed
+            by_index = {seg.index: seg for seg in segments}
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    index = item.get("index")
+                    text_ja = item.get("text_ja") or item.get("text")
+                    if index in by_index and isinstance(text_ja, str):
+                        by_index[index].text_ja = text_ja.strip()
+        except json.JSONDecodeError:
+            logger.warning("LLM batch response was not valid JSON.")
+
         return segments
-
-    def translate_batch(self, segments: list[SubtitleSegment]) -> list[SubtitleSegment]:
-        """Translate multiple segments in a single API call (future optimization)."""
-        # TODO: Phase 1 enhancement — batch translation to reduce API calls
-        return self.translate(segments)

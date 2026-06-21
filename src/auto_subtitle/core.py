@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -22,19 +23,35 @@ ProgressCallback = Callable[[str, str, int | None], None]
 TRANSLATION_SYSTEM_PROMPT = """\
 あなたは多言語動画の字幕翻訳・整形の専門家です。
 
-入力されるテキストは、Whisper により自動認識された言語（日本語・韓国語・中国語・英語など）で書かれています。
-原文がすでに日本語の場合も含め、タイムスタンプ付き字幕（SRTまたはVTT形式）を、
-タイムスタンプの構造や行数を絶対に崩さずに、自然で読みやすい「日本語の字幕」として出力してください。
+入力は Whisper により自動認識された字幕セグメントの JSON です（1動画分を1リクエストで処理します）。
+segments 配列の各要素について、text フィールドの内容のみを自然で読みやすい日本語（text_ja）に翻訳・整形してください。
 
 厳守事項:
-- タイムスタンプ行（例: 00:00:01.000 --> 00:00:04.500）は一字一句変更しない
-- ブロック数・空行の位置・行数を維持する（SRTの場合は番号行も維持）
-- 字幕テキスト行のみを処理する（日本語への翻訳、または日本語としての意訳・整形）
-- 原文が日本語以外の場合は、動画字幕として自然な日本語に意訳する（直訳より読みやすさを優先）
+- 1回のレスポンスですべてのセグメントを返す（セグメントごとの分割出力は禁止）
+- index / start / end は入力値をそのまま維持する
+- segments 配列の要素数は入力と同じ件数を維持する
+- 原文が日本語以外の場合は、動画字幕として自然な日本語に意訳する
 - 原文がすでに日本語の場合は、読みやすい字幕表現に整える（意味を変えない）
 - 1行あたり長くなりすぎないよう短い表現を使う
 - 説明・注釈・Markdownコードブロックは出力しない
-- 翻訳後の字幕ファイルの内容のみを返す
+- 出力は JSON のみ（形式は入力と同じ segments 配列構造）
+"""
+
+TRANSLATION_USER_PROMPT = """\
+以下の JSON は1本の動画から得られた全字幕セグメントです。
+segments 配列の各 text を text_ja に翻訳し、同じ構造の JSON だけを返してください。
+
+出力形式（例）:
+{{
+  "segment_count": 2,
+  "segments": [
+    {{"index": 1, "start": 0.0, "end": 1.5, "text_ja": "..."}},
+    {{"index": 2, "start": 1.5, "end": 3.0, "text_ja": "..."}}
+  ]
+}}
+
+入力 JSON:
+{payload}
 """
 
 
@@ -151,6 +168,70 @@ def transcribe(
     return segments, info.language
 
 
+def segments_to_translation_json(segments: list[SubtitleSegment]) -> str:
+    """Serialize all segments into one JSON payload for a single batch API call."""
+    payload = {
+        "segment_count": len(segments),
+        "segments": [
+            {
+                "index": seg.index,
+                "start": round(seg.start, 3),
+                "end": round(seg.end, 3),
+                "text": seg.text_zh,
+            }
+            for seg in segments
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _extract_json_object(text: str) -> str:
+    cleaned = _strip_markdown_fence(text.strip())
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        return cleaned[start : end + 1]
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+    if start >= 0 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
+
+
+def apply_translated_json(segments: list[SubtitleSegment], raw_response: str) -> int:
+    """Apply batch JSON translation by segment index. Returns number of segments filled."""
+    try:
+        parsed = json.loads(_extract_json_object(raw_response))
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse Gemini response as JSON.")
+        return 0
+
+    items: list[object]
+    if isinstance(parsed, dict):
+        raw_items = parsed.get("segments", [])
+        items = raw_items if isinstance(raw_items, list) else []
+    elif isinstance(parsed, list):
+        items = parsed
+    else:
+        return 0
+
+    by_index = {seg.index: seg for seg in segments}
+    matched = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index")
+        if not isinstance(index, int) or index not in by_index:
+            continue
+        text_ja = item.get("text_ja") or item.get("text")
+        if not isinstance(text_ja, str) or not text_ja.strip():
+            continue
+        by_index[index].text_ja = _sanitize_cue_text(text_ja)
+        matched += 1
+
+    return matched
+
+
 def segments_to_subtitle_text(segments: list[SubtitleSegment], fmt: str) -> str:
     """Combine all segments into a single VTT or SRT document (source language)."""
     if fmt == "srt":
@@ -194,12 +275,45 @@ class ParsedCue:
 
 
 _TIMESTAMP_PATTERN = r"\d{2}:\d{2}:\d{2}[.,]\d{3}"
+_ARROW_LINE = re.compile(
+    rf"^\s*(?:{_TIMESTAMP_PATTERN}|\d{{4}}:\d{{2}}[.,]\d{{3}})\s*-->\s*"
+    rf"(?:{_TIMESTAMP_PATTERN}|\d{{2}}:\d{{2}}:\d{{2}}[.,]\d{{3}})\s*$"
+)
 
 
 def _timestamp_to_seconds(ts: str) -> float:
     ts = ts.strip().replace(",", ".")
     hours, minutes, seconds = ts.split(":")
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _normalize_malformed_vtt_timestamps(text: str) -> str:
+    """Fix common Gemini typos such as ``0002:24.520 --> ...``."""
+
+    def fix_line(line: str) -> str:
+        stripped = line.strip()
+        match = re.match(
+            rf"^(\d{{4}}):(\d{{2}}[.,]\d{{3}})\s*-->\s*({_TIMESTAMP_PATTERN})\s*$",
+            stripped,
+        )
+        if not match:
+            return line
+        hours, minutes = match.group(1)[:2], match.group(1)[2:]
+        return f"{hours}:{minutes}:{match.group(2)} --> {match.group(3)}"
+
+    return "\n".join(fix_line(line) for line in text.splitlines())
+
+
+def _sanitize_cue_text(text: str) -> str:
+    """Remove leaked timestamp lines from cue bodies."""
+    lines: list[str] = []
+    for line in text.splitlines():
+        if _ARROW_LINE.match(line):
+            continue
+        stripped = line.strip()
+        if stripped:
+            lines.append(stripped)
+    return "\n".join(lines)
 
 
 def _parse_vtt_cues(text: str) -> list[ParsedCue]:
@@ -209,17 +323,22 @@ def _parse_vtt_cues(text: str) -> list[ParsedCue]:
 
     pattern = re.compile(
         rf"({_TIMESTAMP_PATTERN})\s*-->\s*({_TIMESTAMP_PATTERN})\s*\n"
-        rf"(.*?)(?=\n{_TIMESTAMP_PATTERN}\s*-->|\Z)",
+        rf"(.*?)(?=\n(?:{_TIMESTAMP_PATTERN}|\d{{4}}:\d{{2}}[.,]\d{{3}})\s*-->|\Z)",
         re.DOTALL,
     )
-    return [
-        ParsedCue(
-            start=_timestamp_to_seconds(start_ts),
-            end=_timestamp_to_seconds(end_ts),
-            text=body_text.strip(),
+    cues: list[ParsedCue] = []
+    for start_ts, end_ts, body_text in pattern.findall(body):
+        text_body = _sanitize_cue_text(body_text)
+        if not text_body:
+            continue
+        cues.append(
+            ParsedCue(
+                start=_timestamp_to_seconds(start_ts),
+                end=_timestamp_to_seconds(end_ts),
+                text=text_body,
+            )
         )
-        for start_ts, end_ts, body_text in pattern.findall(body)
-    ]
+    return cues
 
 
 def _parse_srt_cues(text: str) -> list[ParsedCue]:
@@ -250,29 +369,59 @@ def _split_cue_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
-def _align_translated_segments(
-    segments: list[SubtitleSegment],
-    cues: list[ParsedCue],
-    *,
-    tolerance: float = 0.35,
-) -> int:
-    """Match translated cues to source segments by timestamp and fallbacks."""
-    used_cue_indices: set[int] = set()
-
-    for seg in segments:
-        best_index: int | None = None
-        best_diff = float("inf")
-        for index, cue in enumerate(cues):
-            if index in used_cue_indices:
+def _collapse_spurious_cues(cues: list[ParsedCue]) -> list[ParsedCue]:
+    """Drop Gemini micro-duplicate cues that share text and near-zero duration."""
+    collapsed: list[ParsedCue] = []
+    for cue in cues:
+        duration = max(0.0, cue.end - cue.start)
+        if collapsed:
+            prev = collapsed[-1]
+            same_text = cue.text == prev.text
+            near_start = abs(cue.start - prev.start) < 0.25
+            if 0 < duration < 0.05:
+                if same_text:
+                    collapsed[-1] = ParsedCue(prev.start, max(prev.end, cue.end), prev.text)
                 continue
-            diff = abs(cue.start - seg.start)
-            if diff <= tolerance and diff < best_diff:
-                best_diff = diff
-                best_index = index
-        if best_index is not None:
-            seg.text_ja = cues[best_index].text
-            used_cue_indices.add(best_index)
+            if same_text and (duration < 0.25 or near_start):
+                collapsed[-1] = ParsedCue(prev.start, max(prev.end, cue.end), prev.text)
+                continue
+        collapsed.append(cue)
+    return collapsed
 
+
+def _prepare_translated_cues(translated_text: str, fmt: str) -> list[ParsedCue]:
+    cleaned = _normalize_malformed_vtt_timestamps(_strip_markdown_fence(translated_text))
+    cues = _parse_srt_cues(cleaned) if fmt == "srt" else _parse_vtt_cues(cleaned)
+    return _collapse_spurious_cues(cues)
+
+
+def _text_length(text: str) -> int:
+    return len(text.replace("\n", "").strip())
+
+
+def _segment_duration(seg: SubtitleSegment) -> float:
+    return max(0.0, seg.end - seg.start)
+
+
+def _cue_matches_segment(
+    seg: SubtitleSegment,
+    cue: ParsedCue,
+    *,
+    tolerance: float,
+) -> bool:
+    if abs(cue.start - seg.start) > tolerance:
+        return False
+
+    source_len = _text_length(seg.text_zh)
+    cue_len = _text_length(cue.text)
+    if source_len <= 8 and cue_len > max(source_len * 5, 20):
+        return False
+    if _segment_duration(seg) < 0.12 and cue_len > 25:
+        return False
+    return True
+
+
+def _split_multiline_to_followers(segments: list[SubtitleSegment]) -> None:
     for index, seg in enumerate(segments):
         if not seg.text_ja:
             continue
@@ -289,20 +438,65 @@ def _align_translated_segments(
             for follower, line in zip(followers, lines[1:]):
                 follower.text_ja = line
 
-    unmatched_segments = [seg for seg in segments if not seg.text_ja]
-    unused_cues = [cue for index, cue in enumerate(cues) if index not in used_cue_indices]
 
-    for seg, cue in zip(unmatched_segments, unused_cues):
-        seg.text_ja = cue.text
+def _align_translated_segments(
+    segments: list[SubtitleSegment],
+    cues: list[ParsedCue],
+    *,
+    tolerance: float = 0.35,
+) -> int:
+    """Match cues to segments in timestamp order without stealing long cues for short segments."""
+    used_cue_indices: set[int] = set()
+    cue_index = 0
+
+    for seg in segments:
+        if seg.text_ja:
+            continue
+
+        while cue_index < len(cues) and cues[cue_index].start < seg.start - tolerance:
+            cue_index += 1
+
+        if cue_index >= len(cues):
+            break
+
+        cue = cues[cue_index]
+        if abs(cue.start - seg.start) > tolerance:
+            continue
+
+        if _cue_matches_segment(seg, cue, tolerance=tolerance):
+            seg.text_ja = cue.text
+            used_cue_indices.add(cue_index)
+            cue_index += 1
+
+    _split_multiline_to_followers(segments)
+
+    for seg in segments:
+        if seg.text_ja:
+            continue
+        best_index: int | None = None
+        best_diff = float("inf")
+        for index, cue in enumerate(cues):
+            if index in used_cue_indices:
+                continue
+            if not _cue_matches_segment(seg, cue, tolerance=tolerance):
+                continue
+            diff = abs(cue.start - seg.start)
+            if diff < best_diff:
+                best_diff = diff
+                best_index = index
+        if best_index is not None:
+            seg.text_ja = cues[best_index].text
+            used_cue_indices.add(best_index)
+
+    _split_multiline_to_followers(segments)
 
     remaining_segments = [seg for seg in segments if not seg.text_ja]
-    remaining_cues = [
-        cue for index, cue in enumerate(cues) if index not in used_cue_indices
-    ][len(unmatched_segments) :]
-
-    if remaining_segments and remaining_cues:
-        for cue in remaining_cues:
-            lines = _split_cue_lines(cue.text)
+    remaining_indices = [
+        index for index in range(len(cues)) if index not in used_cue_indices
+    ]
+    if remaining_segments and remaining_indices:
+        for cue_index in remaining_indices:
+            lines = _split_cue_lines(cues[cue_index].text)
             if not lines:
                 continue
             if len(lines) == len(remaining_segments):
@@ -315,7 +509,11 @@ def _align_translated_segments(
                 break
 
     for seg in segments:
-        if not seg.text_ja:
+        if seg.text_ja:
+            continue
+        if _text_length(seg.text_zh) <= 8:
+            seg.text_ja = ""
+        else:
             seg.text_ja = seg.text_zh
 
     return sum(1 for seg in segments if seg.text_ja)
@@ -361,37 +559,39 @@ def apply_translated_subtitle_text(
     translated_text: str,
     fmt: str,
 ) -> None:
-    cleaned = _strip_markdown_fence(translated_text)
-    cues = _parse_srt_cues(cleaned) if fmt == "srt" else _parse_vtt_cues(cleaned)
-    texts = [cue.text for cue in cues]
+    cues = _prepare_translated_cues(translated_text, fmt)
 
-    if len(texts) == len(segments):
-        for seg, text_ja in zip(segments, texts):
-            seg.text_ja = text_ja
-        return
+    if len(cues) != len(segments):
+        _log_segment_count_mismatch(
+            source_count=len(segments),
+            translated_count=len(cues),
+            raw_response=translated_text,
+            fmt=fmt,
+        )
 
-    _log_segment_count_mismatch(
-        source_count=len(segments),
-        translated_count=len(texts),
-        raw_response=translated_text,
-        fmt=fmt,
-    )
-
-    logger.warning(
-        "Segment count mismatch (source=%d, translated=%d). "
-        "Attempting timestamp-based realignment.",
-        len(segments),
-        len(texts),
-    )
-    print(
-        f"[WARN] セグメント数不一致のためタイムスタンプ照合で復旧を試みます "
-        f"(原文 {len(segments)} / 翻訳 {len(texts)})",
-        flush=True,
-    )
+        logger.warning(
+            "Segment count mismatch (source=%d, translated=%d). "
+            "Attempting timestamp-based realignment.",
+            len(segments),
+            len(cues),
+        )
+        print(
+            f"[WARN] セグメント数不一致のためタイムスタンプ照合で復旧を試みます "
+            f"(原文 {len(segments)} / 翻訳 {len(cues)})",
+            flush=True,
+        )
 
     _align_translated_segments(segments, cues)
 
-    fallback_count = sum(1 for seg in segments if seg.text_ja == seg.text_zh)
+    for seg in segments:
+        if seg.text_ja:
+            seg.text_ja = _sanitize_cue_text(seg.text_ja)
+
+    fallback_count = sum(
+        1
+        for seg in segments
+        if seg.text_ja == seg.text_zh and _text_length(seg.text_zh) > 8
+    )
     if fallback_count:
         logger.warning(
             "Used source text as fallback for %d segment(s) after realignment.",
@@ -403,6 +603,43 @@ def apply_translated_subtitle_text(
         )
 
 
+def apply_translation_response(
+    segments: list[SubtitleSegment],
+    raw_response: str,
+    *,
+    fmt: str,
+) -> None:
+    """Apply batch translation response (JSON first, VTT alignment as fallback)."""
+    json_matched = apply_translated_json(segments, raw_response)
+
+    if json_matched == len(segments):
+        logger.info("Batch JSON translation applied to all %d segments.", len(segments))
+        return
+
+    if json_matched > 0:
+        logger.warning(
+            "Batch JSON translation partial (%d/%d). "
+            "Running VTT/timestamp fallback for remaining segments.",
+            json_matched,
+            len(segments),
+        )
+        print(
+            f"[WARN] JSON翻訳が部分一致 ({json_matched}/{len(segments)})。"
+            "VTT形式フォールバックで残りを復旧します。",
+            flush=True,
+        )
+    else:
+        logger.warning(
+            "Batch JSON translation failed to parse; falling back to VTT alignment."
+        )
+        print(
+            "[WARN] JSON翻訳のパースに失敗しました。VTT形式フォールバックを試みます。",
+            flush=True,
+        )
+
+    apply_translated_subtitle_text(segments, raw_response, fmt)
+
+
 def translate_segments(
     segments: list[SubtitleSegment],
     *,
@@ -410,6 +647,7 @@ def translate_segments(
     model_name: str,
     subtitle_fmt: str = "vtt",
 ) -> list[SubtitleSegment]:
+    """Translate all segments in a single Gemini API request (no per-segment loop)."""
     from google import genai
     from google.genai import types
 
@@ -417,24 +655,30 @@ def translate_segments(
         return segments
 
     client = genai.Client(api_key=api_key)
-    source_text = segments_to_subtitle_text(segments, subtitle_fmt)
-    fmt_label = subtitle_fmt.upper()
+    payload = segments_to_translation_json(segments)
+    segment_count = len(segments)
+
+    logger.info(
+        "Gemini batch translation: 1 API request for %d segments (model=%s)",
+        segment_count,
+        model_name,
+    )
+    print(
+        f"[INFO] Gemini 一括翻訳: {segment_count} セグメントを 1 リクエストで送信します",
+        flush=True,
+    )
 
     response = client.models.generate_content(
         model=model_name,
-        contents=(
-            f"以下は{fmt_label}形式の字幕です（Whisper による自動言語認識の結果）。"
-            f"原文の言語に関わらず、タイムスタンプの構造を維持したまま、"
-            f"自然で読みやすい日本語の字幕として出力してください。\n\n"
-            f"{source_text}"
-        ),
+        contents=TRANSLATION_USER_PROMPT.format(payload=payload),
         config=types.GenerateContentConfig(
             system_instruction=TRANSLATION_SYSTEM_PROMPT,
             temperature=0.2,
+            response_mime_type="application/json",
         ),
     )
 
-    apply_translated_subtitle_text(segments, response.text or "", subtitle_fmt)
+    apply_translation_response(segments, response.text or "", fmt=subtitle_fmt)
     return segments
 
 
