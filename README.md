@@ -1,6 +1,6 @@
 # Auto Subtitle Viewer
 
-![Demo](demo.gif)
+<img src="demo.gif" alt="Demo" width="40%">
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
