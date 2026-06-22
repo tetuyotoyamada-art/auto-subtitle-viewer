@@ -1,6 +1,8 @@
 # =============================================================================
 # Auto Subtitle Viewer - Python dependencies
-# Install: pip install -r requirements.txt && pip install -e .
+# First-time setup (Windows): setup.bat
+# Manual: pip install -r requirements.txt && pip install -e .
+# GPU (optional): pip install -r requirements-cuda.txt
 # Python 3.10+ required
 # =============================================================================
 
@@ -22,9 +24,9 @@ pydantic>=2.0.0
 # --- GPU acceleration (CUDA 12, optional) ---
 # Required for WHISPER_DEVICE=cuda on Windows/Linux with NVIDIA GPU.
 # Skip or comment out on CPU-only machines or macOS (use WHISPER_DEVICE=cpu).
-nvidia-cublas-cu12
-nvidia-cudnn-cu12>=9,<10
-nvidia-cuda-nvrtc-cu12
+# nvidia-cublas-cu12
+# nvidia-cudnn-cu12>=9,<10
+# nvidia-cuda-nvrtc-cu12
 
 # =============================================================================
 # System dependencies (not installed via pip)

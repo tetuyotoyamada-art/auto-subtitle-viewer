@@ -16,13 +16,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from auto_subtitle.api.schemas import (
+    AppConfigResponse,
     HealthResponse,
     PathGenerateRequest,
     ProgressEvent,
     SegmentResponse,
     SubtitleGenerateResponse,
 )
-from auto_subtitle.config import AppConfig, load_config
+from auto_subtitle.config import AppConfig, load_config, resolve_whisper_device
 from auto_subtitle.core import ProcessOptions, process_media
 from auto_subtitle.subtitle.models import SubtitleSegment
 from auto_subtitle.video.hardsub import VIDEO_EXTENSIONS, burn_subtitles_into_video
@@ -52,21 +53,35 @@ def _build_options(
     config: AppConfig,
     *,
     format: str,
-    whisper_model: str,
-    device: str,
-    compute_type: str,
+    whisper_model: str | None,
+    device: str | None,
+    compute_type: str | None,
     gemini_model: str | None,
 ) -> ProcessOptions:
-    compute = compute_type
-    if device == "cpu" and compute == "float16":
+    resolved_model = whisper_model or config.whisper.model
+    resolved_device = resolve_whisper_device(device or config.whisper.device)
+    compute = compute_type or config.whisper.compute_type
+    if resolved_device == "cpu" and compute == "float16":
         compute = "int8"
 
     return ProcessOptions(
-        whisper_model=whisper_model,
-        device=device,  # type: ignore[arg-type]
+        whisper_model=resolved_model,
+        device=resolved_device,  # type: ignore[arg-type]
         compute_type=compute,
         subtitle_fmt=format,  # type: ignore[arg-type]
         gemini_model=gemini_model or config.gemini.model,
+    )
+
+
+def _app_config_response(config: AppConfig) -> AppConfigResponse:
+    device = resolve_whisper_device(config.whisper.device)
+    compute_type = config.whisper.compute_type
+    if device == "cpu" and compute_type == "float16":
+        compute_type = "int8"
+    return AppConfigResponse(
+        whisper_device=device,  # type: ignore[arg-type]
+        whisper_model=config.whisper.model,
+        whisper_compute_type=compute_type,
     )
 
 
@@ -179,13 +194,18 @@ async def health() -> HealthResponse:
     return HealthResponse()
 
 
+@router.get("/config", response_model=AppConfigResponse)
+async def app_config() -> AppConfigResponse:
+    return _app_config_response(load_config())
+
+
 @router.post("/subtitles/generate", response_model=SubtitleGenerateResponse)
 async def generate_from_upload(
     file: UploadFile = File(..., description="Video or audio file"),
     format: Literal["vtt", "srt"] = Form("vtt"),
-    whisper_model: str = Form("large-v3"),
-    device: Literal["cuda", "cpu"] = Form("cuda"),
-    compute_type: str = Form("float16"),
+    whisper_model: str | None = Form(None),
+    device: Literal["cuda", "cpu"] | None = Form(None),
+    compute_type: str | None = Form(None),
     gemini_model: str | None = Form(None),
 ) -> SubtitleGenerateResponse:
     if not file.filename:
@@ -225,9 +245,9 @@ async def generate_from_upload(
 async def generate_from_upload_stream(
     file: UploadFile = File(..., description="Video or audio file"),
     format: Literal["vtt", "srt"] = Form("vtt"),
-    whisper_model: str = Form("large-v3"),
-    device: Literal["cuda", "cpu"] = Form("cuda"),
-    compute_type: str = Form("float16"),
+    whisper_model: str | None = Form(None),
+    device: Literal["cuda", "cpu"] | None = Form(None),
+    compute_type: str | None = Form(None),
     gemini_model: str | None = Form(None),
 ) -> StreamingResponse:
     config = load_config()

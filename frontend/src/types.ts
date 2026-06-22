@@ -52,3 +52,10 @@ export interface AppErrorInfo {
   hint?: string
   statusCode?: number
 }
+
+export interface AppConfig {
+  status: string
+  whisper_device: 'cuda' | 'cpu'
+  whisper_model: string
+  whisper_compute_type: string
+}

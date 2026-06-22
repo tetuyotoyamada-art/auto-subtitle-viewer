@@ -1,4 +1,5 @@
 import type {
+  AppConfig,
   AppErrorInfo,
   ProgressEvent,
   Segment,
@@ -111,14 +112,36 @@ export async function checkHealth(): Promise<boolean> {
   }
 }
 
-function buildFormData(
-  file: File,
-  options: { format?: SubtitleFormat; device?: 'cuda' | 'cpu' },
-): FormData {
+export async function fetchAppConfig(): Promise<AppConfig | null> {
+  try {
+    const response = await fetch(`${API_BASE}/api/config`)
+    if (!response.ok) return null
+    return (await response.json()) as AppConfig
+  } catch {
+    return null
+  }
+}
+
+interface WhisperRequestOptions {
+  format?: SubtitleFormat
+  device?: 'cuda' | 'cpu'
+  whisperModel?: string
+  computeType?: string
+}
+
+function buildFormData(file: File, options: WhisperRequestOptions): FormData {
   const formData = new FormData()
   formData.append('file', file)
   formData.append('format', options.format ?? 'vtt')
-  formData.append('device', options.device ?? 'cuda')
+  if (options.device) {
+    formData.append('device', options.device)
+  }
+  if (options.whisperModel) {
+    formData.append('whisper_model', options.whisperModel)
+  }
+  if (options.computeType) {
+    formData.append('compute_type', options.computeType)
+  }
   return formData
 }
 
@@ -141,10 +164,7 @@ function parseSseBlock(block: string): { event: string; data: string } | null {
 
 export async function generateSubtitlesStream(
   file: File,
-  options: {
-    format?: SubtitleFormat
-    device?: 'cuda' | 'cpu'
-  },
+  options: WhisperRequestOptions,
   onProgress: (event: ProgressEvent) => void,
 ): Promise<SubtitleGenerateResponse> {
   const response = await fetch(`${API_BASE}/api/subtitles/generate-stream`, {
@@ -197,10 +217,7 @@ export async function generateSubtitlesStream(
 
 export async function generateSubtitles(
   file: File,
-  options: {
-    format?: SubtitleFormat
-    device?: 'cuda' | 'cpu'
-  } = {},
+  options: WhisperRequestOptions = {},
 ): Promise<SubtitleGenerateResponse> {
   const response = await fetch(`${API_BASE}/api/subtitles/generate`, {
     method: 'POST',

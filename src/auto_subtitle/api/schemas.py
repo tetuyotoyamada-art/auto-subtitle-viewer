@@ -25,14 +25,21 @@ class SubtitleGenerateResponse(BaseModel):
 class PathGenerateRequest(BaseModel):
     file_path: str = Field(..., description="Local path to a video/audio file")
     format: Literal["vtt", "srt"] = "vtt"
-    whisper_model: str = "large-v3"
-    device: Literal["cuda", "cpu"] = "cuda"
-    compute_type: str = "float16"
+    whisper_model: str | None = None
+    device: Literal["cuda", "cpu"] | None = None
+    compute_type: str | None = None
     gemini_model: str | None = None
 
 
 class HealthResponse(BaseModel):
     status: str = "ok"
+
+
+class AppConfigResponse(BaseModel):
+    status: str = "ok"
+    whisper_device: Literal["cuda", "cpu"]
+    whisper_model: str
+    whisper_compute_type: str
 
 
 class ProgressEvent(BaseModel):

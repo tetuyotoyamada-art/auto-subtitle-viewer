@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   generateSubtitlesStream,
   checkHealth,
+  fetchAppConfig,
   downloadHardSubVideo,
   toFriendlyError,
 } from './api/client'
@@ -13,6 +14,7 @@ import { SubtitleSettings } from './components/SubtitleSettings'
 import { UploadZone } from './components/UploadZone'
 import { VideoPlayer, type VideoPlayerHandle } from './components/VideoPlayer'
 import type {
+  AppConfig,
   AppErrorInfo,
   JobStage,
   ProgressEvent,
@@ -62,6 +64,7 @@ export default function App() {
   })
   const [error, setError] = useState<AppErrorInfo | null>(null)
   const [apiOnline, setApiOnline] = useState<boolean | null>(null)
+  const [appConfig, setAppConfig] = useState<AppConfig | null>(null)
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
@@ -90,6 +93,7 @@ export default function App() {
 
   useEffect(() => {
     checkHealth().then(setApiOnline)
+    fetchAppConfig().then(setAppConfig)
     return () => revokeUrls()
   }, [revokeUrls])
 
@@ -115,7 +119,12 @@ export default function App() {
       try {
         const result = await generateSubtitlesStream(
           file,
-          { format },
+          {
+            format,
+            device: appConfig?.whisper_device,
+            whisperModel: appConfig?.whisper_model,
+            computeType: appConfig?.whisper_compute_type,
+          },
           (event) => {
             const next = mapProgressEvent(event)
             setProgress(next)
@@ -141,7 +150,7 @@ export default function App() {
         setProgress({ stage: 'error', message: '処理中にエラーが発生しました' })
       }
     },
-    [format, revokeUrls],
+    [appConfig, format, revokeUrls],
   )
 
   const handleReset = () => {

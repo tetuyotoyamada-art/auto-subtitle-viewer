@@ -1,0 +1,12 @@
+# Optional GPU packages for WHISPER_DEVICE=cuda (CUDA 12, NVIDIA driver 535+)
+# Install after requirements.txt:
+#   .venv\Scripts\activate.bat
+#   pip install -r requirements-cuda.txt
+#
+# CPU-only or older NVIDIA drivers: skip this file and set in .env:
+#   WHISPER_DEVICE=cpu
+#   WHISPER_COMPUTE_TYPE=int8
+
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9,<10
+nvidia-cuda-nvrtc-cu12

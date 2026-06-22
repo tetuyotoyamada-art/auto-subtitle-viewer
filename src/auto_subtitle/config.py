@@ -32,6 +32,20 @@ class AppConfig:
     output_format: str = "vtt"
 
 
+def resolve_whisper_device(requested: str) -> str:
+    """Use CUDA when requested and available; otherwise fall back to CPU."""
+    if requested != "cuda":
+        return requested
+    try:
+        import ctranslate2
+
+        if ctranslate2.get_cuda_device_count() > 0:
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
 def load_config(env_path: Path | None = None) -> AppConfig:
     """Load configuration from .env and environment variables."""
     if env_path:
